@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interview Note-Taker</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 460px; margin: 6vh auto; padding: 0 20px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #888; margin-top: 0; }
+  label { display: block; margin: 14px 0 4px; font-weight: 600; font-size: 13px; }
+  input {
+    width: 100%; padding: 9px 11px; border: 1px solid #bbb;
+    border-radius: 8px; font-size: 15px; background: transparent; color: inherit;
+  }
+  .row { display: flex; gap: 12px; margin-top: 22px; align-items: center; }
+  button {
+    flex: 1; padding: 13px; border: 0; border-radius: 10px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  #start { background: #1f8b4c; color: #fff; }
+  #stop  { background: #c0392b; color: #fff; }
+  button:disabled { opacity: .4; cursor: default; }
+  #timer {
+    font-variant-numeric: tabular-nums; font-size: 15px; min-width: 64px;
+    text-align: center; color: #c0392b; font-weight: 600;
+  }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+         background: #c0392b; margin-right: 6px; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+  #result {
+    margin-top: 24px; padding: 14px; border: 1px solid #2a2; border-radius: 10px;
+    display: none;
+  }
+  #result.show { display: block; }
+  #result.err { border-color: #c0392b; }
+  audio { width: 100%; margin-top: 10px; }
+  .meta { color: #888; font-size: 13px; }
+  code { background: rgba(127,127,127,.18); padding: 1px 5px; border-radius: 4px; }
+  #transcribe {
+    margin-top: 12px; background: #2c5fc0; color: #fff; padding: 11px; font-size: 15px;
+  }
+  #transcript {
+    width: 100%; min-height: 180px; margin-top: 12px; padding: 11px;
+    border: 1px solid #bbb; border-radius: 8px; font-size: 14px; line-height: 1.5;
+    background: transparent; color: inherit; resize: vertical; display: none;
+  }
+  #transcript.show { display: block; }
+  #condense {
+    margin-top: 12px; background: #6b3fa0; color: #fff; padding: 11px; font-size: 15px;
+    display: none;
+  }
+  #condense.show { display: block; }
+  #review { display: none; margin-top: 24px; }
+  #review.show { display: block; }
+  #slider { width: 100%; margin-top: 6px; }
+  #ticks { display: flex; justify-content: space-between; font-size: 12px; color: #888; }
+  #stoplabel { margin-top: 10px; font-weight: 600; }
+  #review-text {
+    width: 100%; min-height: 220px; margin-top: 8px; padding: 11px;
+    border: 1px solid #bbb; border-radius: 8px; font-size: 14px; line-height: 1.5;
+    background: transparent; color: inherit; resize: vertical;
+  }
+  #save { margin-top: 12px; background: #1f8b4c; color: #fff; padding: 11px; font-size: 15px; }
+</style>
+</head>
+<body>
+  <h1>Interview Note-Taker</h1>
+  <p class="sub">Record, transcribe, and condense the interviewer's side. Trim with the slider, then save.</p>
+
+  <label for="person">Person</label>
+  <input id="person" placeholder="Interviewer name">
+  <label for="company">Company</label>
+  <input id="company" placeholder="Company">
+  <label for="role">Role</label>
+  <input id="role" placeholder="Role">
+
+  <div class="row">
+    <button id="start">● Start</button>
+    <button id="stop" disabled>■ Stop</button>
+    <span id="timer"></span>
+  </div>
+
+  <div id="result"></div>
+  <textarea id="transcript" placeholder="Transcript will appear here, editable."></textarea>
+  <button id="condense">Condense</button>
+
+  <div id="review">
+    <label>Trim with the slider (switches instantly, no API calls)</label>
+    <input type="range" id="slider" min="0" max="5" step="1" value="4">
+    <div id="ticks">
+      <span>Full</span><span>80%</span><span>50%</span><span>25%</span><span>10%</span><span>5%</span>
+    </div>
+    <div id="stoplabel" class="meta"></div>
+    <textarea id="review-text" placeholder="Condensed version, editable."></textarea>
+    <button id="save">Save to Sheet</button>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let pollTimer = null;
+let lastFile = null;
+
+// Condense state. The slider switches between these in-memory strings with no
+// API calls; "full" is the (possibly edited) transcript.
+let versions = null;
+const STOPS = ["full", "v80", "v50", "v25", "v10", "v5"];
+const STOP_LABELS = ["Full transcript", "~80%", "~50%", "~25%", "~10%", "~5%"];
+let curStop = 4;  // default to ~10%, the "~10% that matters" from the PRD
+
+function fmt(s) {
+  s = Math.floor(s);
+  const m = String(Math.floor(s / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${m}:${ss}`;
+}
+
+async function poll() {
+  try {
+    const st = await (await fetch("/api/status")).json();
+    if (st.recording) {
+      $("timer").innerHTML = `<span class="dot"></span>${fmt(st.elapsed_s)}`;
+    }
+  } catch (_) {}
+}
+
+function setRecording(on) {
+  $("start").disabled = on;
+  $("stop").disabled = !on;
+  if (on) {
+    pollTimer = setInterval(poll, 1000);
+    poll();
+  } else {
+    clearInterval(pollTimer);
+    $("timer").textContent = "";
+  }
+}
+
+$("start").onclick = async () => {
+  $("result").className = "";
+  const r = await fetch("/api/start", { method: "POST" });
+  const d = await r.json();
+  if (!r.ok) { showError(d.error); return; }
+  setRecording(true);
+};
+
+$("stop").onclick = async () => {
+  const r = await fetch("/api/stop", { method: "POST" });
+  const d = await r.json();
+  setRecording(false);
+  if (!r.ok) { showError(d.error); return; }
+  lastFile = d.filename;
+  const kb = (d.size_bytes / 1024).toFixed(0);
+  $("transcript").className = "";
+  $("condense").className = "";   // hide condense + review until a fresh transcript
+  $("review").className = "";
+  versions = null;
+  $("result").className = "show";
+  $("result").innerHTML = `
+    <strong>Recording saved.</strong>
+    <div class="meta">${fmt(d.duration_s)} · ${kb} KB · <code>${d.filename}</code></div>
+    <audio controls src="${d.url}"></audio>
+    <button id="transcribe">Transcribe</button>`;
+  $("transcribe").onclick = runTranscribe;
+};
+
+async function runTranscribe() {
+  const btn = $("transcribe");
+  btn.disabled = true;
+  btn.textContent = "Transcribing... (up to a few minutes for long calls)";
+  const r = await fetch("/api/transcribe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: lastFile }),
+  });
+  const d = await r.json();
+  if (!r.ok) { showError(d.error); btn.disabled = false; btn.textContent = "Transcribe"; return; }
+  btn.textContent = "Re-transcribe";
+  btn.disabled = false;
+  $("transcript").value = d.text;
+  $("transcript").className = "show";
+  $("condense").textContent = "Condense";
+  $("condense").className = "show";  // reveal the condense step
+  $("review").className = "";        // hide any prior review until re-condensed
+  versions = null;
+}
+
+async function runCondense() {
+  const text = $("transcript").value.trim();
+  if (!text) return;
+  const btn = $("condense");
+  btn.disabled = true;
+  btn.textContent = "Condensing... (one Claude call)";
+  const r = await fetch("/api/condense", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  const d = await r.json();
+  btn.disabled = false;
+  btn.textContent = "Re-condense";
+  if (!r.ok) { showError(d.error); return; }
+  versions = Object.assign({ full: text }, d.versions);
+  curStop = 4;                       // default to ~10%
+  $("slider").value = String(curStop);
+  renderStop();
+  $("review").className = "show";
+}
+
+function renderStop() {
+  if (!versions) return;
+  $("review-text").value = versions[STOPS[curStop]] || "";
+  $("stoplabel").textContent = "Showing: " + STOP_LABELS[curStop];
+}
+
+function showError(msg) {
+  $("result").className = "show err";
+  $("result").innerHTML = `<strong>Error</strong><div class="meta">${msg || "Unknown error"}</div>`;
+}
+
+// Wire the static review controls (they exist in the DOM from the start).
+$("condense").onclick = runCondense;
+// Dragging the slider only swaps in-memory text — no network calls.
+$("slider").oninput = () => { curStop = +$("slider").value; renderStop(); };
+// Keep hand edits: persist the current box back into the selected version.
+$("review-text").oninput = () => {
+  if (versions) versions[STOPS[curStop]] = $("review-text").value;
+};
+
+// Save the currently displayed (edited) version as a new row in the Sheet.
+$("save").onclick = async () => {
+  const notes = $("review-text").value.trim();
+  if (!notes) { showError("Nothing to save yet."); return; }
+  const btn = $("save");
+  btn.disabled = true;
+  btn.textContent = "Saving...";
+  const r = await fetch("/api/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      notes,
+      person: $("person").value,
+      company: $("company").value,
+      role: $("role").value,
+    }),
+  });
+  const d = await r.json();
+  btn.disabled = false;
+  btn.textContent = "Save to Sheet";
+  if (!r.ok) { showError(d.error); return; }
+  $("stoplabel").innerHTML =
+    'Saved to the sheet. <a href="' + d.url + '" target="_blank">Open it</a>';
+};
+</script>
+</body>
+</html>

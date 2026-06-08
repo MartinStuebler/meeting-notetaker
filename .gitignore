@@ -1,0 +1,14 @@
+venv/
+recordings/
+models/
+*.wav
+*.bin
+.env
+__pycache__/
+*.pyc
+# OAuth + Sheets (Phase 4)
+token.json
+client_secret*.json
+sheet_id.txt
+ignore_me_DS
+.DS_Store
