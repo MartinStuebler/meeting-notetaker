@@ -17,8 +17,7 @@ MODEL = os.path.join(HERE, "models", "ggml-small.en.bin")
 
 
 class TranscribeError(RuntimeError):
-    pass
-
+    """ranscribes meeting audio into text."""
 
 def _whisper_bin():
     """Find the whisper-cli binary (PATH first, then the Homebrew location)."""
@@ -40,7 +39,7 @@ def transcribe(wav_path):
         )
 
     cmd = [_whisper_bin(), "-m", MODEL, "-f", wav_path, "-nt", "-np"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
     if proc.returncode != 0:
         raise TranscribeError(f"whisper-cli failed:\n{proc.stderr.strip()}")
 
