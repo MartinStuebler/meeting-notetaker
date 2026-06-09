@@ -1,81 +1,43 @@
-"""Audio capture from the Background Music virtual device via ffmpeg.
+"""System-audio capture via the native sysaudio-rec helper.
 
 Single-session: one recording at a time (single user, single machine). The PRD
-captures *system audio only* (the interviewer's voice), now routed through the
-Background Music app, so there is one track and no diarization.
+captures *system audio only* (the interviewer's voice). We now capture it with a
+small native macOS helper (helper/sysaudio-rec, built from sysaudio-rec.swift)
+that uses ScreenCaptureKit, the same engine behind Cmd+Shift+5 system-audio
+recording. This replaces the old ffmpeg + Background Music virtual-device path.
 
-Records mono 16 kHz WAV, which is exactly what whisper.cpp wants in Phase 2, so
-no re-encode is needed later.
+Advantages over the old approach: it captures system audio only (never the mic),
+it does not reroute the output device (so the speakers and volume keys keep
+working), and there is nothing to configure.
+
+The helper writes mono 16 kHz 16-bit PCM WAV directly, which is exactly what
+whisper.cpp wants in transcribe.py, so no re-encode is needed later.
+
+The helper records until it receives SIGINT, then finalizes the WAV header and
+exits 0. We start it on start() and SIGINT it on stop(), the same clean-stop
+path the standalone smoke test used.
 """
 
 import os
-import re
 import signal
 import subprocess
 import time
 
-FFMPEG = "ffmpeg"
+HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Exact avfoundation device name to capture from. Must match exactly so we pick
-# the full "Background Music" device and not "Background Music (UI Sounds)".
-DEVICE_NAME = "Background Music"
-
-# Cached avfoundation audio-device index for the capture device.
-_device_index = None
+# Absolute path to the native helper binary. Absolute so capture works when the
+# app is launched from the Dock, where PATH does not include anything useful.
+HELPER = os.path.join(HERE, "helper", "sysaudio-rec")
 
 # Single-session recording state.
 _proc = None
 _path = None
 _started_at = None
-_log = None  # open file handle for ffmpeg stderr
+_log = None  # open file handle for the helper's stderr
 
 
 class RecorderError(RuntimeError):
     pass
-
-
-def find_device_index(refresh=False):
-    """Return the avfoundation audio-input index for the DEVICE_NAME device.
-
-    ffmpeg prints the device list to stderr; lines look like:
-        [AVFoundation indev @ 0x..] [2] Background Music (UI Sounds)
-        [AVFoundation indev @ 0x..] [6] Background Music
-    We match the device name exactly (not a substring) so "Background Music"
-    wins over "Background Music (UI Sounds)". The bracketed number is the index
-    we pass as ``-i ":<idx>"``.
-    """
-    global _device_index
-    if _device_index is not None and not refresh:
-        return _device_index
-
-    proc = subprocess.run(
-        [FFMPEG, "-hide_banner", "-f", "avfoundation",
-         "-list_devices", "true", "-i", ""],
-        capture_output=True, text=True,
-    )
-    listing = proc.stderr
-
-    # Only consider the audio-devices section; video devices share the [N] format.
-    in_audio = False
-    for line in listing.splitlines():
-        if "AVFoundation audio devices" in line:
-            in_audio = True
-            continue
-        if "AVFoundation video devices" in line:
-            in_audio = False
-            continue
-        if not in_audio:
-            continue
-        # Pull the "[N] <name>" at the end of the line and match name exactly.
-        m = re.search(r"\[(\d+)\]\s+(.+?)\s*$", line)
-        if m and m.group(2).strip().lower() == DEVICE_NAME.lower():
-            _device_index = int(m.group(1))
-            return _device_index
-
-    raise RecorderError(
-        f"'{DEVICE_NAME}' audio device not found in ffmpeg's avfoundation device "
-        f"list. Is the Background Music app running?\n\n" + listing
-    )
 
 
 def is_recording():
@@ -94,36 +56,43 @@ def start(path):
     if is_recording():
         raise RecorderError("Already recording.")
 
-    idx = find_device_index()
+    if not os.path.exists(HELPER):
+        raise RecorderError(
+            f"Recorder helper not found at {HELPER}. Build it with:\n"
+            f"  swiftc -O -o helper/sysaudio-rec helper/sysaudio-rec.swift"
+        )
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    # -i ":<idx>"  -> audio-only capture from that avfoundation audio device.
-    cmd = [
-        FFMPEG, "-hide_banner", "-loglevel", "warning",
-        "-f", "avfoundation", "-i", f":{idx}",
-        "-ac", "1", "-ar", "16000",
-        "-y", path,
-    ]
-    # ffmpeg's stderr goes to a log file, not an undrained PIPE: an unread PIPE
-    # fills (~64 KB) and ffmpeg blocks on write, silently halting capture after
-    # a fraction of a second. Keep stdin open so we can send 'q' to finalize.
+    # The helper takes the output WAV path as its first argument and records
+    # until it gets SIGINT. Its stderr goes to a log file (not an unread PIPE,
+    # which could fill and block the process): startup errors, including a
+    # denied Screen/System-Audio Recording permission, land there for us to
+    # surface.
     log_path = path + ".log"
     _log = open(log_path, "wb")
     _proc = subprocess.Popen(
-        cmd, stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL, stderr=_log,
+        [HELPER, path],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=_log,
     )
     _path = path
     _started_at = time.time()
 
-    # Fail fast if ffmpeg died immediately (e.g. device busy / permissions).
+    # Fail fast if the helper died immediately (e.g. permission denied). It
+    # prints the reason to stderr (our log file) and exits non-zero.
     time.sleep(0.5)
     if _proc.poll() is not None:
         _log.flush()
         with open(log_path, "r", errors="replace") as f:
-            err = f.read()
+            err = f.read().strip()
         _reset()
-        raise RecorderError(f"ffmpeg failed to start recording:\n{err}")
+        raise RecorderError(
+            "System-audio recorder failed to start.\n\n" + err + "\n\n"
+            "If this is the first run from the Dock, macOS may be asking for "
+            "Screen & System Audio Recording permission. Grant it and try again."
+        )
 
     return {"path": path, "started_at": _started_at}
 
@@ -136,17 +105,14 @@ def stop():
 
     proc, path, started = _proc, _path, _started_at
 
-    # Ask ffmpeg to quit cleanly so the WAV header/duration is finalized.
-    try:
-        proc.stdin.write(b"q\n")
-        proc.stdin.flush()
-    except (BrokenPipeError, ValueError, OSError):
-        pass
-
+    # SIGINT is the helper's clean-stop signal: it finalizes the WAV header and
+    # exits 0. This is the exact path the standalone smoke test used.
+    proc.send_signal(signal.SIGINT)
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        proc.send_signal(signal.SIGINT)
+        # Last resort: SIGTERM (also a clean stop), then hard kill.
+        proc.send_signal(signal.SIGTERM)
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -159,8 +125,9 @@ def stop():
 
     if size == 0:
         raise RecorderError(
-            "Recording produced an empty file. Check that the Multi-Output Device "
-            "is selected as system output and audio was actually playing."
+            "Recording produced an empty file. Check that audio was actually "
+            "playing and that Screen & System Audio Recording permission is "
+            "granted."
         )
 
     return {

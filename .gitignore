@@ -15,3 +15,5 @@ ignore_me_DS
 # Dock launcher (Phase 5)
 Meeting Notetaker.app/
 launcher.log
+# Compiled recorder helper (build from helper/sysaudio-rec.swift; see recorder.py)
+helper/sysaudio-rec

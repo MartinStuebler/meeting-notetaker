@@ -15,13 +15,14 @@ import subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL = os.path.join(HERE, "models", "ggml-small.en.bin")
 
+# Resolve whisper-cli to an absolute path so transcription works when the app is
+# launched from the Dock, where PATH does not include Homebrew's bin. Prefer
+# whatever is on PATH, then fall back to the Homebrew path.
+WHISPER = shutil.which("whisper-cli") or "/opt/homebrew/bin/whisper-cli"
+
 
 class TranscribeError(RuntimeError):
     """ranscribes meeting audio into text."""
-
-def _whisper_bin():
-    """Find the whisper-cli binary (PATH first, then the Homebrew location)."""
-    return shutil.which("whisper-cli") or "/opt/homebrew/bin/whisper-cli"
 
 
 def transcribe(wav_path):
@@ -38,7 +39,7 @@ def transcribe(wav_path):
             "Download ggml-small.en.bin into the models/ folder."
         )
 
-    cmd = [_whisper_bin(), "-m", MODEL, "-f", wav_path, "-nt", "-np"]
+    cmd = [WHISPER, "-m", MODEL, "-f", wav_path, "-nt", "-np"]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
     if proc.returncode != 0:
         raise TranscribeError(f"whisper-cli failed:\n{proc.stderr.strip()}")

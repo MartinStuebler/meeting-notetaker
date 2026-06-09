@@ -205,7 +205,24 @@ async function runCondense() {
   btn.disabled = false;
   btn.textContent = "Re-condense";
   if (!r.ok) { showError(d.error); return; }
-  versions = Object.assign({ full: text }, d.versions);
+
+  // Guard the payload. A 200 whose `versions` is missing or wrong-shaped would
+  // otherwise leave the box silently empty and look like a slider bug (the
+  // slider label is hardcoded and updates regardless of the data). Log the
+  // actual shape and surface a clear error instead of a blank box.
+  const v = d.versions;
+  const want = ["v80", "v50", "v25", "v10", "v5"];
+  const shapeOk = v && typeof v === "object" &&
+    want.every((k) => typeof v[k] === "string" && v[k].length > 0);
+  console.log("[condense] received versions:", v);
+  if (!shapeOk) {
+    const got = v && typeof v === "object" ? Object.keys(v).join(", ") : typeof v;
+    showError("Condense returned an unexpected shape (got keys: " + got +
+      "). Expected v80, v50, v25, v10, v5. See the console for the raw payload.");
+    return;
+  }
+
+  versions = Object.assign({ full: text }, v);
   curStop = 4;                       // default to ~10%
   $("slider").value = String(curStop);
   renderStop();

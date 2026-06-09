@@ -18,7 +18,7 @@ A local Mac tool that records an online interview, transcribes the interviewer's
 
 ## Current phase
 
-> Phase 2 complete and verified: whisper.cpp (whisper-cli + small.en) transcribes the saved WAV via transcribe.py and the /api/transcribe endpoint, with a Transcribe button in the UI. A 60 min file transcribes in about 72 s (roughly 50x realtime). Next up is Phase 3: the condense step plus the on-page review and trim UI.
+> Phases 1 to 4 complete and verified. Pipeline works end to end: record (Background Music device) and save WAV, transcribe locally with whisper.cpp (small.en), condense with one Claude call (Haiku 4.5) into five versions (condense.py), review and trim with the slider plus hand edits in the UI, then Save appends a row (Date, Person, Company, Role, Notes) to the auto-created Interview Tracker Google Sheet (sheets.py, OAuth, /api/save). Next up is Phase 5: cleanup and polish (auto-delete audio after success, confirm fields, error handling).
 
 Update this line as we finish each phase so a fresh session knows where we are.
 
