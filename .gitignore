@@ -12,3 +12,6 @@ client_secret*.json
 sheet_id.txt
 ignore_me_DS
 .DS_Store
+# Dock launcher (Phase 5)
+Meeting Notetaker.app/
+launcher.log
